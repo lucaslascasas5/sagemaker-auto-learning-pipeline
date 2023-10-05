@@ -1,0 +1,11 @@
+{
+    "input_uri": "s3://lascasas-black-belt-2022-ml/raw_data/PS_20174392719_1491204439457_log.csv",
+    "train_uri": "s3://lascasas-black-belt-2022-ml/step_functions_tests/train.csv",
+    "validation_uri": "s3://lascasas-black-belt-2022-ml/step_functions_tests/validation.csv",
+    "test_uri": "s3://lascasas-black-belt-2022-ml/step_functions_tests/test.csv",
+    "output_path": "s3://lascasas-black-belt-2022-ml/step_functions_tests/models",
+    "batch_output_path": "s3://lascasas-black-belt-2022-ml/step_functions_tests/batch/",
+    "instance_type": "ml.m5.large",
+    "batch_instance_type": "ml.m5.large",
+    "hpo_job_name": "test-demo-0"
+}

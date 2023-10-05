@@ -1,0 +1,9 @@
+{
+    "Parameters": {
+        "Stage": "STAGE_PLACEHOLDER",
+        "SecurityGroupID": "SECURITY_GROUP_ID_PLACEHOLDER",
+        "SubnetIDs": "SUBNET_IDS_PLACEHOLDER",
+        "VPCEndpointAPIID": "VPC_ENDPOINT_API_ID_PLACEHOLDER",
+        "RolesList": "ROLES_LIST_PLACEHOLDER"
+    }
+}

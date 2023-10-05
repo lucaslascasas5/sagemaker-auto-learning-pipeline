@@ -1,0 +1,29 @@
+{
+    "model_package_arn": "arn:aws:sagemaker:us-east-1:599785286404:model-package/xgboost-fraud-models-prd/2",
+    "transactions": {
+        "0": {
+            "step": 1,
+            "type": "PAYMENT",
+            "amount": 9839.64,
+            "nameOrig": "C1231006815",
+            "oldbalanceOrg": 170136,
+            "newbalanceOrig": 160296.36,
+            "nameDest": "M1979787155",
+            "oldbalanceDest": 0,
+            "newbalanceDest": 0,
+            "isFlaggedFraud": 0
+        },
+        "1": {
+            "step": 668,
+            "type": "TRANSFER",
+            "amount": 307455.42,
+            "nameOrig": "C1775746074",
+            "oldbalanceOrg": 307455.42,
+            "newbalanceOrig": 0,
+            "nameDest": "C746009679",
+            "oldbalanceDest": 0,
+            "newbalanceDest": 0,
+            "isFlaggedFraud": 0
+        }
+    }
+}

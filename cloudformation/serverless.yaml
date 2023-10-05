@@ -1,0 +1,287 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Transform: "AWS::Serverless-2016-10-31"
+
+Parameters:
+  Stage:
+    Type: "String"
+    Description: "Application Environment"
+    AllowedValues: ["dev", "hml", "prd"]
+  SecurityGroupID:
+    Type: "AWS::EC2::SecurityGroup::Id"
+    Description: "The Security Group in the VPC to control access to services"
+  SubnetIDs:
+    Type: "List<AWS::EC2::Subnet::Id>"
+    Description: "List of subnets in the VPC. Recommended 3 subnets."
+  VPCEndpointAPIID:
+    Type: "String"
+    Description: Endpoint IDs for API Gateway
+  RolesList:
+    Type: "CommaDelimitedList"
+    Description: "ARN for the API infer lambda function"
+
+Globals:
+  Function:
+    Runtime: "python3.9"
+    MemorySize: 512
+    Timeout: 900
+    Tags:
+      "Stage": !Ref "Stage"
+
+Resources:
+  SystemBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub "black-belt-bucket-${AWS::AccountId}-${AWS::Region}-${Stage}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  BBChallengeAPI:
+    Type: "AWS::Serverless::Api"
+    Properties:
+      OpenApiVersion: "3.0.3"
+      StageName: !Ref "Stage"
+      Name: !Sub "black-belt-api-${Stage}"
+      EndpointConfiguration:
+        Type: PRIVATE
+        VpcEndpointIds:
+          - !Ref VPCEndpointAPIID
+      Auth:
+        ApiKeyRequired: true
+        ResourcePolicy:
+          CustomStatements:
+            - Effect: "Allow"
+              Principal: "*"
+              Action: "execute-api:Invoke"
+              Resource: !Sub "execute-api:/${Stage}/*"
+              Condition:
+                StringEquals:
+                  aws:SourceVpce: !Ref VPCEndpointAPIID
+        UsagePlan:
+          CreateUsagePlan: SHARED
+          UsagePlanName: !Sub "black-belt-usage-plan-${Stage}"
+
+  BBAPIInferFunction:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      CodeUri: ../api/
+      Handler: "infer.lambda_handler"
+      FunctionName: !Sub "black-belt-infer-${Stage}"
+      Role: !Select [ 0, !Ref RolesList ] 
+      Timeout: 30
+      Layers:
+        - "arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python39:1"
+      Environment:
+        Variables:
+          endpoint_name: "sagemaker-xgboost-2022-11-02-18-10-54-479"
+          fraud_treshold: "0.6"
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref SecurityGroupID
+        SubnetIds: !Ref SubnetIDs
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /infer
+            Method: post
+            RestApiId:
+              Ref: BBChallengeAPI
+
+  BBAPIListFunction:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      CodeUri: ../api/
+      Handler: "list_models.lambda_handler"
+      FunctionName: !Sub "black-belt-list-models-${Stage}"
+      Role: !Select [ 0, !Ref RolesList ] 
+      Timeout: 30
+      Environment:
+        Variables:
+          model_package_group_name: !Sub "xgboost-fraud-models-${Stage}"
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref SecurityGroupID
+        SubnetIds: !Ref SubnetIDs
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /model/list
+            Method: get
+            RestApiId:
+              Ref: BBChallengeAPI
+
+  BBAPIApproveFunction:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      CodeUri: ../api/
+      Handler: "approve_model.lambda_handler"
+      FunctionName: !Sub "black-belt-approve-model-${Stage}"
+      Role: !Select [ 0, !Ref RolesList ] 
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref SecurityGroupID
+        SubnetIds: !Ref SubnetIDs
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /model/approve
+            Method: post
+            RestApiId:
+              Ref: BBChallengeAPI
+
+  BBAPIDeployEndpointFunction:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      CodeUri: ../api/
+      Handler: "deploy_endpoint.lambda_handler"
+      FunctionName: !Sub "black-belt-deploy-endpoint-${Stage}"
+      Role: !Select [ 0, !Ref RolesList ] 
+      Timeout: 30
+      Environment:
+        Variables:
+          default_instance_type: "ml.m5.large"
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref SecurityGroupID
+        SubnetIds: !Ref SubnetIDs
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /model/deploy
+            Method: post
+            RestApiId:
+              Ref: BBChallengeAPI
+
+  BBAPIDeleteEndpointFunction:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      CodeUri: ../api/
+      Handler: "delete_endpoint.lambda_handler"
+      FunctionName: !Sub "black-belt-delete-endpoint-${Stage}"
+      Role: !Select [ 0, !Ref RolesList ] 
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref SecurityGroupID
+        SubnetIds: !Ref SubnetIDs
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /model/delete
+            Method: post
+            RestApiId:
+              Ref: BBChallengeAPI
+
+  BBAPIDescribeEndpointFunction:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      CodeUri: ../api/
+      Handler: "describe_endpoint.lambda_handler"
+      FunctionName: !Sub "black-belt-describe-endpoint-${Stage}"
+      Role: !Select [ 0, !Ref RolesList ] 
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref SecurityGroupID
+        SubnetIds: !Ref SubnetIDs
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /model/describe
+            Method: post
+            RestApiId:
+              Ref: BBChallengeAPI
+
+  ModelDataFunction:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      CodeUri: ../lambda/
+      Handler: "model_data.lambda_handler"
+      FunctionName: !Sub "black-belt-model-data-${Stage}"
+      Role: !Select [ 1, !Ref RolesList ]
+      MemorySize: 3008
+      Layers:
+        - "arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python39:1"
+
+  ExtractModel:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      CodeUri: ../lambda/
+      Handler: "extract_model.lambda_handler"
+      FunctionName: !Sub "black-belt-extract-model-${Stage}"
+      Role: !Select [ 1, !Ref RolesList ]
+      Layers:
+        - "arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python39:1"
+
+  RegisterModelFunction:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      CodeUri: ../lambda/
+      Handler: "register_model.lambda_handler"
+      FunctionName: !Sub "black-belt-register-model-${Stage}"
+      Role: !Select [ 1, !Ref RolesList ]
+      Timeout: 900
+      MemorySize: 1024
+      Layers:
+        - "arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python39:1"
+      Environment:
+        Variables:
+          model_package_group_name: !Sub "xgboost-fraud-models-${Stage}"
+
+  ModelTrainingOrchestrator:
+    Type: "AWS::Serverless::StateMachine"
+    Properties:
+      DefinitionUri: ../stepfunctions/hpo_orchestrator.asl.json
+      Role: !Select [ 3, !Ref RolesList ]
+      Name: !Sub "black-belt-hpo-orchestrator-${Stage}"
+      DefinitionSubstitutions:
+        MODEL_DATA_LAMBDA_ARN: !GetAtt ModelDataFunction.Arn
+        SAGEMAKER_ROLE_ARN: !Select [ 2, !Ref RolesList ]
+        EXTRACT_MODEL_LAMBDA_ARN: !GetAtt ExtractModel.Arn
+        REGISTER_MODEL_LAMBDA_ARN: !GetAtt RegisterModelFunction.Arn
+
+  SystemTriggerFunction:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      CodeUri: ../lambda/
+      Handler: "system_trigger.lambda_handler"
+      FunctionName: !Sub "black-belt-system-trigger-${Stage}"
+      Role: !Select [ 1, !Ref RolesList ]
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          project_bucket: !Ref SystemBucket
+          input_data: "s3://black-belt-bucket-599785286404-us-east-1-prd/raw/big_dataset.csv"
+          training_instance: "ml.m5.large"
+          batch_instance: "ml.m5.large"
+          orchestrator_arn: !GetAtt ModelTrainingOrchestrator.Arn
+
+  SystemTriggerEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: "cron(0 1 ? * SAT *)"
+      Name: !Sub "black-belt-system-trigger-${Stage}"
+      Description: "Triggers the system"
+      State: "DISABLED"
+      Targets:
+        -
+          Arn: !GetAtt SystemTriggerFunction.Arn
+          Id: "SystemTriggerFunction"
+
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref "SystemTriggerFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt SystemTriggerEvent.Arn

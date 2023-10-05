@@ -1,0 +1,224 @@
+{
+    "StartAt": "Model Data",
+    "States": {
+        "Model Data": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${MODEL_DATA_LAMBDA_ARN}",
+                "Payload": {
+                    "input_uri.$": "$.input_uri",
+                    "train_uri.$": "$.train_uri",
+                    "validation_uri.$": "$.validation_uri",
+                    "test_uri.$": "$.test_uri",
+                    "undersample_ratio": 10
+                }
+            },
+            "Next": "HyperparameterTuning",
+            "ResultPath": null,
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "BackoffRate": 1,
+                    "IntervalSeconds": 1,
+                    "MaxAttempts": 2
+                }
+            ]
+        },
+        "HyperparameterTuning": {
+            "Resource": "arn:aws:states:::sagemaker:createHyperParameterTuningJob.sync",
+            "Parameters": {
+                "HyperParameterTuningJobName.$": "$.hpo_job_name",
+                "HyperParameterTuningJobConfig": {
+                    "Strategy": "Bayesian",
+                    "HyperParameterTuningJobObjective": {
+                        "Type": "Minimize",
+                        "MetricName": "validation:error"
+                    },
+                    "ResourceLimits": {
+                        "MaxNumberOfTrainingJobs": 20,
+                        "MaxParallelTrainingJobs": 5
+                    },
+                    "ParameterRanges": {
+                        "ContinuousParameterRanges": [
+                            {
+                                "Name": "gamma",
+                                "MinValue": "0",
+                                "MaxValue": "5",
+                                "ScalingType": "Auto"
+                            },
+                            {
+                                "Name": "eta",
+                                "MinValue": "0.1",
+                                "MaxValue": "0.5",
+                                "ScalingType": "Auto"
+                            },
+                            {
+                                "Name": "min_child_weight",
+                                "MinValue": "0",
+                                "MaxValue": "120",
+                                "ScalingType": "Auto"
+                            },
+                            {
+                                "Name": "subsample",
+                                "MinValue": "0.5",
+                                "MaxValue": "1",
+                                "ScalingType": "Auto"
+                            }
+                        ],
+                        "IntegerParameterRanges": [
+                            {
+                                "Name": "max_depth",
+                                "MinValue": "0",
+                                "MaxValue": "10",
+                                "ScalingType": "Auto"
+                            }
+                        ]
+                    }
+                },
+                "TrainingJobDefinition": {
+                    "AlgorithmSpecification": {
+                        "TrainingImage": "683313688378.dkr.ecr.us-east-1.amazonaws.com/sagemaker-xgboost:1.5-1",
+                        "TrainingInputMode": "File"
+                    },
+                    "OutputDataConfig": {
+                        "S3OutputPath.$": "$.output_path"
+                    },
+                    "StoppingCondition": {
+                        "MaxRuntimeInSeconds": 86400
+                    },
+                    "ResourceConfig": {
+                        "InstanceCount": 1,
+                        "InstanceType.$": "$.instance_type",
+                        "VolumeSizeInGB": 30
+                    },
+                    "RoleArn": "${SAGEMAKER_ROLE_ARN}",
+                    "InputDataConfig": [
+                        {
+                            "DataSource": {
+                                "S3DataSource": {
+                                    "S3DataDistributionType": "ShardedByS3Key",
+                                    "S3DataType": "S3Prefix",
+                                    "S3Uri.$": "$.train_uri"
+                                }
+                            },
+                            "ChannelName": "train",
+                            "ContentType": "text/csv"
+                        },
+                        {
+                            "DataSource": {
+                                "S3DataSource": {
+                                    "S3DataDistributionType": "ShardedByS3Key",
+                                    "S3DataType": "S3Prefix",
+                                    "S3Uri.$": "$.validation_uri"
+                                }
+                            },
+                            "ChannelName": "validation",
+                            "ContentType": "text/csv"
+                        }
+                    ],
+                    "StaticHyperParameters": {
+                        "verbosity": "1",
+                        "objective": "binary:logistic",
+                        "num_round": "50"
+                    }
+                }
+            },
+            "Type": "Task",
+            "ResultPath": "$.train_output",
+            "Next": "Extract Model Path"
+        },
+        "Extract Model Path": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${EXTRACT_MODEL_LAMBDA_ARN}",
+                "Payload": {
+                    "data.$": "$.train_output"
+                }
+            },
+            "Next": "Save Model",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "BackoffRate": 1,
+                    "IntervalSeconds": 1,
+                    "MaxAttempts": 2
+                }
+            ],
+            "ResultPath": "$.model_path"
+        },
+        "Save Model": {
+            "Parameters": {
+                "PrimaryContainer": {
+                    "Image": "683313688378.dkr.ecr.us-east-1.amazonaws.com/sagemaker-xgboost:1.5-1",
+                    "Environment": {},
+                    "ModelDataUrl.$": "$.model_path.Payload"
+                },
+                "ExecutionRoleArn": "${SAGEMAKER_ROLE_ARN}",
+                "ModelName.$": "$.train_output.BestTrainingJob.TrainingJobName"
+            },
+            "Resource": "arn:aws:states:::sagemaker:createModel",
+            "Type": "Task",
+            "Next": "Batch transform",
+            "ResultPath": null
+        },
+        "Batch transform": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sagemaker:createTransformJob.sync",
+            "Parameters": {
+                "ModelName.$": "$.train_output.BestTrainingJob.TrainingJobName",
+                "TransformInput": {
+                    "CompressionType": "None",
+                    "ContentType": "text/csv",
+                    "DataSource": {
+                        "S3DataSource": {
+                            "S3DataType": "S3Prefix",
+                            "S3Uri.$": "$.test_uri"
+                        }
+                    }
+                },
+                "TransformOutput": {
+                    "S3OutputPath.$": "$.batch_output_path"
+                },
+                "TransformResources": {
+                    "InstanceCount": 1,
+                    "InstanceType.$": "$.batch_instance_type"
+                },
+                "TransformJobName.$": "$$.Execution.Name"
+            },
+            "Next": "Register Model",
+            "ResultPath": null
+        },
+        "Register Model": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${REGISTER_MODEL_LAMBDA_ARN}",
+                "Payload": {
+                    "model_uri.$": "$.model_path.Payload",
+                    "image_uri": "683313688378.dkr.ecr.us-east-1.amazonaws.com/sagemaker-xgboost:1.5-1",
+                    "batch_output_path.$": "$.batch_output_path",
+                    "test_data_path.$": "$.test_uri",
+                    "model_name.$": "$.train_output.BestTrainingJob.TrainingJobName"
+                }
+            },
+            "ResultPath": null,
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "BackoffRate": 1,
+                    "IntervalSeconds": 1,
+                    "MaxAttempts": 2
+                }
+            ],
+            "End": true
+        }
+    }
+}
