@@ -1,0 +1,854 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: "Build the stack for any project"
+
+Parameters:
+  ApplicationName:
+    Type: "String"
+    Description: "The name of the application"
+  SecurityGroupID:
+    Type: "AWS::EC2::SecurityGroup::Id"
+    Description: "The Security Group in the VPC to control access to services"
+  SubnetIDs:
+    Type: "List<AWS::EC2::Subnet::Id>"
+    Description: "List of subnets in the VPC. Recommended 3 subnets."
+  VPCEndpointAPIID:
+    Type: "String"
+    Description: Endpoint ID for API Gateway
+
+
+Resources:
+  CodeCommitRepo:
+    Type: "AWS::CodeCommit::Repository"
+    Properties:
+      RepositoryName: !Sub "${ApplicationName}-repository"
+
+  DeployArtifactsBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub "${ApplicationName}-${AWS::AccountId}-${AWS::Region}-da"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  CodeBuildRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
+      Policies:
+        - PolicyName: "CodeBuildBasePolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*:*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:GetBucketAcl"
+                  - "s3:GetBucketLocation"
+                  - "s3:ListBucket"
+                Resource: 
+                  - !GetAtt "DeployArtifactsBucket.Arn"
+                  - !Join ['/', [!GetAtt "DeployArtifactsBucket.Arn", "*"]]
+              - Effect: "Allow"
+                Action: "codecommit:GitPull"
+                Resource: !GetAtt "CodeCommitRepo.Arn"
+              - Effect: "Allow"
+                Action:
+                  - "codebuild:CreateReportGroup"
+                  - "codebuild:CreateReport"
+                  - "codebuild:UpdateReport"
+                  - "codebuild:BatchPutTestCases"
+                  - "codebuild:BatchPutCodeCoverages"
+                Resource: !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/"
+
+  CodeBuildProject:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      Name: !Ref "ApplicationName"
+      Artifacts:
+        Type: "S3"
+        Location: !Ref "DeployArtifactsBucket"
+      Environment:
+        ComputeType: "BUILD_GENERAL1_SMALL"
+        Image: "aws/codebuild/standard:4.0"
+        Type: "LINUX_CONTAINER"
+      ServiceRole: !GetAtt "CodeBuildRole.Arn"
+      Source:
+        Type: "CODECOMMIT"
+        Location: !Sub "https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${CodeCommitRepo}"
+
+  CodePipelineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "codepipeline.amazonaws.com"
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: "AWSCodePipelineServiceRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "iam:PassRole"
+                Resource: "*"
+                Condition:
+                  StringEqualsIfExists:
+                    iam:PassedToService:
+                      - "cloudformation.amazonaws.com"
+              - Effect: "Allow"
+                Action:
+                  - "codecommit:CancelUploadArchive"
+                  - "codecommit:GetBranch"
+                  - "codecommit:GetCommit"
+                  - "codecommit:GetUploadArchiveStatus"
+                  - "codecommit:UploadArchive"
+                Resource: "*"
+              - Effect: "Allow"
+                Action: "codecommit:GitPull"
+                Resource: !GetAtt "CodeCommitRepo.Arn"
+              - Effect: "Allow"
+                Action:
+                  - "cloudwatch:*"
+                  - "s3:*"
+                  - "lambda:*"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "cloudformation:CreateStack"
+                  - "cloudformation:DeleteStack"
+                  - "cloudformation:DescribeStacks"
+                  - "cloudformation:UpdateStack"
+                  - "cloudformation:CreateChangeSet"
+                  - "cloudformation:DeleteChangeSet"
+                  - "cloudformation:DescribeChangeSet"
+                  - "cloudformation:ExecuteChangeSet"
+                  - "cloudformation:SetStackPolicy"
+                  - "cloudformation:ValidateTemplate"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "codebuild:BatchGetBuilds"
+                  - "codebuild:StartBuild"
+                  - "codebuild:BatchGetBuildBatches"
+                  - "codebuild:StartBuildBatch"
+                Resource: "*"
+
+  CodePipelineDev:
+    Type: "AWS::CodePipeline::Pipeline"
+    Properties:
+      ArtifactStore:
+        Location: !Ref "DeployArtifactsBucket"
+        Type: "S3"
+      RestartExecutionOnUpdate: false
+      Name: !Sub "${ApplicationName}-pipeline-dev"
+      RoleArn: !GetAtt "CodePipelineRole.Arn"
+      Stages:
+        - Name: "Source"
+          Actions:
+            - Name: "Source"
+              ActionTypeId:
+                Category: "Source"
+                Owner: "AWS"
+                Provider: "CodeCommit"
+                Version: "1"
+              Configuration:
+                BranchName: "dev"
+                RepositoryName: !GetAtt CodeCommitRepo.Name
+              OutputArtifacts:
+                - Name: "SourceArtifact"
+        - Name: "Build"
+          Actions:
+            - Name: "Build"
+              ActionTypeId:
+                Category: "Build"
+                Owner: "AWS"
+                Provider: "CodeBuild"
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref "CodeBuildProject"
+                EnvironmentVariables: !Sub
+                  - |
+                    [
+                      {
+                        "name": "STAGE",
+                        "value": "dev"
+                      },
+                      {
+                        "name": "ARTIFACT_BUCKET",
+                        "value": "${DeployArtifactsBucket}"
+                      },
+                      {
+                        "name": "SECURITY_GROUP_ID",
+                        "value": "${SecurityGroupID}"
+                      },
+                      {
+                        "name": "VPC_ENDPOINT_API_ID",
+                        "value": "${VPCEndpointAPIID}"
+                      },
+                      {
+                        "name": "SUBNET_IDS",
+                        "value": "${SUBNET_LIST_STR}"
+                      },
+                      {
+                        "name": "ROLES_LIST",
+                        "value": "${APILambdaRole.Arn},${LambdaRole.Arn},${SageMakerExecutionRole.Arn},${SFNOrchestratorRole.Arn}"
+                      }
+                    ]
+                  - SUBNET_LIST_STR: !Join [",", !Ref SubnetIDs]
+                BatchEnabled: false
+              InputArtifacts:
+                - Name: "SourceArtifact"
+              OutputArtifacts:
+                - Name: "BuildArtifact"
+        - Name: "Deploy"
+          Actions:
+            - Name: "UpdateChangeSet"
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Provider: "CloudFormation"
+                Version: "1"
+              Configuration:
+                ActionMode: "CHANGE_SET_REPLACE"
+                StackName: !Sub "${ApplicationName}-sam-dev"
+                Capabilities: "CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND"
+                ChangeSetName: !Sub "${ApplicationName}-changeset-dev"
+                TemplatePath: "BuildArtifact::cloudformation/serverless.yaml"
+                TemplateConfiguration: "BuildArtifact::cloudformation/configuration.json"
+                RoleArn: !GetAtt "CloudFormationRole.Arn"
+              InputArtifacts:
+                - Name: "BuildArtifact"
+              RunOrder: 1
+            - Name: "ExecuteChangeSet"
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Provider: "CloudFormation"
+                Version: "1"
+              Configuration:
+                ActionMode: "CHANGE_SET_EXECUTE"
+                StackName: !Sub "${ApplicationName}-sam-dev"
+                ChangeSetName: !Sub "${ApplicationName}-changeset-dev"
+              InputArtifacts:
+                - Name: "BuildArtifact"
+              RunOrder: 2
+
+  CodePipelineHomolog:
+    Type: "AWS::CodePipeline::Pipeline"
+    Properties:
+      ArtifactStore:
+        Location: !Ref "DeployArtifactsBucket"
+        Type: "S3"
+      RestartExecutionOnUpdate: false
+      Name: !Sub "${ApplicationName}-pipeline-hml"
+      RoleArn: !GetAtt "CodePipelineRole.Arn"
+      Stages:
+        - Name: "Source"
+          Actions:
+            - Name: "Source"
+              ActionTypeId:
+                Category: "Source"
+                Owner: "AWS"
+                Provider: "CodeCommit"
+                Version: "1"
+              Configuration:
+                BranchName: "hml"
+                RepositoryName: !GetAtt CodeCommitRepo.Name
+              OutputArtifacts:
+                - Name: "SourceArtifact"
+        - Name: "Build"
+          Actions:
+            - Name: "Build"
+              ActionTypeId:
+                Category: "Build"
+                Owner: "AWS"
+                Provider: "CodeBuild"
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref "CodeBuildProject"
+                EnvironmentVariables: !Sub
+                  - |
+                    [
+                      {
+                        "name": "STAGE",
+                        "value": "hml"
+                      },
+                      {
+                        "name": "ARTIFACT_BUCKET",
+                        "value": "${DeployArtifactsBucket}"
+                      },
+                      {
+                        "name": "SECURITY_GROUP_ID",
+                        "value": "${SecurityGroupID}"
+                      },
+                      {
+                        "name": "VPC_ENDPOINT_API_ID",
+                        "value": "${VPCEndpointAPIID}"
+                      },
+                      {
+                        "name": "SUBNET_IDS",
+                        "value": "${SUBNET_LIST_STR}"
+                      },
+                      {
+                        "name": "ROLES_LIST",
+                        "value": "${APILambdaRole.Arn},${LambdaRole.Arn},${SageMakerExecutionRole.Arn},${SFNOrchestratorRole.Arn}"
+                      }
+                    ]
+                  - SUBNET_LIST_STR: !Join [",", !Ref SubnetIDs]
+                BatchEnabled: false
+              InputArtifacts:
+                - Name: "SourceArtifact"
+              OutputArtifacts:
+                - Name: "BuildArtifact"
+        - Name: "Deploy"
+          Actions:
+            - Name: "UpdateChangeSet"
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Provider: "CloudFormation"
+                Version: "1"
+              Configuration:
+                ActionMode: "CHANGE_SET_REPLACE"
+                StackName: !Sub "${ApplicationName}-sam-hml"
+                Capabilities: "CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND"
+                ChangeSetName: !Sub "${ApplicationName}-changeset-hml"
+                TemplatePath: "BuildArtifact::cloudformation/serverless.yaml"
+                TemplateConfiguration: "BuildArtifact::cloudformation/configuration.json"
+                RoleArn: !GetAtt "CloudFormationRole.Arn"
+              InputArtifacts:
+                - Name: "BuildArtifact"
+              RunOrder: 1
+            - Name: "ExecuteChangeSet"
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Provider: "CloudFormation"
+                Version: "1"
+              Configuration:
+                ActionMode: "CHANGE_SET_EXECUTE"
+                StackName: !Sub "${ApplicationName}-sam-hml"
+                ChangeSetName: !Sub "${ApplicationName}-changeset-hml"
+              InputArtifacts:
+                - Name: "BuildArtifact"
+              RunOrder: 2
+
+  CodePipelinePrd:
+    Type: "AWS::CodePipeline::Pipeline"
+    Properties:
+      ArtifactStore:
+        Location: !Ref "DeployArtifactsBucket"
+        Type: "S3"
+      RestartExecutionOnUpdate: false
+      Name: !Sub "${ApplicationName}-pipeline-prd"
+      RoleArn: !GetAtt "CodePipelineRole.Arn"
+      Stages:
+        - Name: "Source"
+          Actions:
+            - Name: "Source"
+              ActionTypeId:
+                Category: "Source"
+                Owner: "AWS"
+                Provider: "CodeCommit"
+                Version: "1"
+              Configuration:
+                BranchName: "prd"
+                RepositoryName: !GetAtt CodeCommitRepo.Name
+              OutputArtifacts:
+                - Name: "SourceArtifact"
+        - Name: "Build"
+          Actions:
+            - Name: "Build"
+              ActionTypeId:
+                Category: "Build"
+                Owner: "AWS"
+                Provider: "CodeBuild"
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref "CodeBuildProject"
+                EnvironmentVariables: !Sub
+                  - |
+                    [
+                      {
+                        "name": "STAGE",
+                        "value": "prd"
+                      },
+                      {
+                        "name": "ARTIFACT_BUCKET",
+                        "value": "${DeployArtifactsBucket}"
+                      },
+                      {
+                        "name": "SECURITY_GROUP_ID",
+                        "value": "${SecurityGroupID}"
+                      },
+                      {
+                        "name": "VPC_ENDPOINT_API_ID",
+                        "value": "${VPCEndpointAPIID}"
+                      },
+                      {
+                        "name": "SUBNET_IDS",
+                        "value": "${SUBNET_LIST_STR}"
+                      },
+                      {
+                        "name": "ROLES_LIST",
+                        "value": "${APILambdaRole.Arn},${LambdaRole.Arn},${SageMakerExecutionRole.Arn},${SFNOrchestratorRole.Arn}"
+                      }
+                    ]
+                  - SUBNET_LIST_STR: !Join [",", !Ref SubnetIDs]
+                BatchEnabled: false
+              InputArtifacts:
+                - Name: "SourceArtifact"
+              OutputArtifacts:
+                - Name: "BuildArtifact"
+        - Name: "Deploy"
+          Actions:
+            - Name: "UpdateChangeSet"
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Provider: "CloudFormation"
+                Version: "1"
+              Configuration:
+                ActionMode: "CHANGE_SET_REPLACE"
+                StackName: !Sub "${ApplicationName}-sam-prd"
+                Capabilities: "CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND"
+                ChangeSetName: !Sub "${ApplicationName}-changeset-prd"
+                TemplatePath: "BuildArtifact::cloudformation/serverless.yaml"
+                TemplateConfiguration: "BuildArtifact::cloudformation/configuration.json"
+                RoleArn: !GetAtt "CloudFormationRole.Arn"
+              InputArtifacts:
+                - Name: "BuildArtifact"
+              RunOrder: 1
+            - Name: "ExecuteChangeSet"
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Provider: "CloudFormation"
+                Version: "1"
+              Configuration:
+                ActionMode: "CHANGE_SET_EXECUTE"
+                StackName: !Sub "${ApplicationName}-sam-prd"
+                ChangeSetName: !Sub "${ApplicationName}-changeset-prd"
+              InputArtifacts:
+                - Name: "BuildArtifact"
+              RunOrder: 2
+
+  CloudFormationRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "cloudformation.amazonaws.com"
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AWSLambda_FullAccess"
+        - "arn:aws:iam::aws:policy/AWSCloudFormationFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+        - "arn:aws:iam::aws:policy/AmazonAPIGatewayAdministrator"
+        - "arn:aws:iam::aws:policy/AWSStepFunctionsFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonEventBridgeFullAccess"
+      Policies:
+        - PolicyName: "PassRoleAccess"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "iam:PassRole"
+                Resource: "*"
+
+  APILambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: "APILambdaRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "sagemaker:DescribeModelPackage"
+                  - "sagemaker:ListCandidatesForAutoMLJob"
+                  - "sagemaker:ListModelBiasJobDefinitions"
+                  - "sagemaker:ListTransformJobs"
+                  - "sagemaker:ListHumanTaskUis"
+                  - "sagemaker:Search"
+                  - "sagemaker:DescribeModelPackageGroup"
+                  - "sagemaker:GetRecord"
+                  - "sagemaker:DescribeFlowDefinition"
+                  - "sagemaker:ListTrainingJobs"
+                  - "sagemaker:DescribeAlgorithm"
+                  - "sagemaker:ListExperiments"
+                  - "sagemaker:DescribeTransformJob"
+                  - "sagemaker:ListFeatureGroups"
+                  - "sagemaker:DescribeInferenceRecommendationsJob"
+                  - "sagemaker:DescribeHumanLoop"
+                  - "sagemaker:BatchDescribeModelPackage"
+                  - "sagemaker:DescribeDeviceFleet"
+                  - "sagemaker:DescribeHyperParameterTuningJob"
+                  - "sagemaker:ListCompilationJobs"
+                  - "ec2:CreateNetworkInterface"
+                  - "sagemaker:DescribeWorkforce"
+                  - "sagemaker:DescribeProcessingJob"
+                  - "sagemaker:GetDeviceFleetReport"
+                  - "sagemaker:DescribeStudioLifecycleConfig"
+                  - "sagemaker:ListStudioLifecycleConfigs"
+                  - "sagemaker:RenderUiTemplate"
+                  - "sagemaker:ListModelExplainabilityJobDefinitions"
+                  - "sagemaker:DescribeImageVersion"
+                  - "sagemaker:ListPipelineParametersForExecution"
+                  - "sagemaker:ListDomains"
+                  - "sagemaker:ListEdgePackagingJobs"
+                  - "sagemaker:ListModelMetadata"
+                  - "sagemaker:ListUserProfiles"
+                  - "sagemaker:ListWorkteams"
+                  - "sagemaker:DescribeHumanTaskUi"
+                  - "sagemaker:DescribeProject"
+                  - "sagemaker:GetSagemakerServicecatalogPortfolioStatus"
+                  - "sagemaker:ListImageVersions"
+                  - "sagemaker:ListAutoMLJobs"
+                  - "sagemaker:ListMonitoringSchedules"
+                  - "sagemaker:ListInferenceRecommendationsJobSteps"
+                  - "sagemaker:ListProcessingJobs"
+                  - "sagemaker:ListEdgeDeploymentPlans"
+                  - "sagemaker:DescribeModelExplainabilityJobDefinition"
+                  - "sagemaker:DeleteEndpoint"
+                  - "sagemaker:ListDevices"
+                  - "sagemaker:DescribeEndpoint"
+                  - "sagemaker:ListInferenceRecommendationsJobs"
+                  - "sagemaker:DescribeUserProfile"
+                  - "sagemaker:InvokeEndpoint"
+                  - "sagemaker:DescribeFeatureMetadata"
+                  - "sagemaker:DescribeEdgePackagingJob"
+                  - "sagemaker:DescribeFeatureGroup"
+                  - "sagemaker:DescribeModelQualityJobDefinition"
+                  - "sagemaker:DescribeModel"
+                  - "sagemaker:DescribePipeline"
+                  - "sagemaker:DescribeArtifact"
+                  - "sagemaker:ListHyperParameterTuningJobs"
+                  - "sagemaker:ListWorkforces"
+                  - "sagemaker:DescribeImage"
+                  - "sagemaker:ListPipelines"
+                  - "sagemaker:InvokeEndpointAsync"
+                  - "sagemaker:DescribePipelineDefinitionForExecution"
+                  - "sagemaker:DescribeTrialComponent"
+                  - "sagemaker:ListEndpoints"
+                  - "sagemaker:ListApps"
+                  - "sagemaker:DescribeTrainingJob"
+                  - "sagemaker:DescribeLabelingJob"
+                  - "sagemaker:DescribeDataQualityJobDefinition"
+                  - "sagemaker:ListArtifacts"
+                  - "sagemaker:ListDataQualityJobDefinitions"
+                  - "sagemaker:ListMonitoringExecutions"
+                  - "sagemaker:DescribeApp"
+                  - "sagemaker:GetLineageGroupPolicy"
+                  - "logs:CreateLogStream"
+                  - "sagemaker:ListSubscribedWorkteams"
+                  - "sagemaker:ListLabelingJobsForWorkteam"
+                  - "sagemaker:ListLineageGroups"
+                  - "sagemaker:ListPipelineExecutions"
+                  - "sagemaker:DescribeAction"
+                  - "sagemaker:CreateEndpoint"
+                  - "sagemaker:ListAlgorithms"
+                  - "ec2:DeleteNetworkInterface"
+                  - "sagemaker:ListNotebookInstanceLifecycleConfigs"
+                  - "sagemaker:DescribeSubscribedWorkteam"
+                  - "sagemaker:ListTrials"
+                  - "sagemaker:ListDeviceFleets"
+                  - "logs:CreateLogGroup"
+                  - "sagemaker:DescribeAutoMLJob"
+                  - "sagemaker:ListEndpointConfigs"
+                  - "sagemaker:CreateEndpointConfig"
+                  - "sagemaker:ListTrainingJobsForHyperParameterTuningJob"
+                  - "sagemaker:ListActions"
+                  - "sagemaker:DescribeEndpointConfig"
+                  - "sagemaker:ListStageDevices"
+                  - "sagemaker:ListAppImageConfigs"
+                  - "sagemaker:BatchGetRecord"
+                  - "sagemaker:DeleteEndpointConfig"
+                  - "sagemaker:GetDeviceRegistration"
+                  - "sagemaker:DescribeNotebookInstance"
+                  - "sagemaker:DescribeAppImageConfig"
+                  - "sagemaker:ListProjects"
+                  - "sagemaker:ListContexts"
+                  - "sagemaker:DescribeLineageGroup"
+                  - "sagemaker:ListHumanLoops"
+                  - "sagemaker:DescribeNotebookInstanceLifecycleConfig"
+                  - "sagemaker:QueryLineage"
+                  - "sagemaker:DescribeTrial"
+                  - "sagemaker:ListAssociations"
+                  - "sagemaker:DescribeContext"
+                  - "ec2:DescribeNetworkInterfaces"
+                  - "sagemaker:DescribeEdgeDeploymentPlan"
+                  - "sagemaker:ListModelPackageGroups"
+                  - "sagemaker:ListImages"
+                  - "sagemaker:ListModelQualityJobDefinitions"
+                  - "sagemaker:ListNotebookInstances"
+                  - "sagemaker:ListFlowDefinitions"
+                  - "sagemaker:DescribeMonitoringSchedule"
+                  - "sagemaker:ListTags"
+                  - "sagemaker:UpdateModelPackage"
+                  - "sagemaker:GetModelPackageGroupPolicy"
+                  - "sagemaker:ListTrialComponents"
+                  - "logs:PutLogEvents"
+                  - "sagemaker:DescribePipelineExecution"
+                  - "sagemaker:DescribeWorkteam"
+                  - "sagemaker:ListModelPackages"
+                  - "sagemaker:DescribeModelBiasJobDefinition"
+                  - "sagemaker:ListLabelingJobs"
+                  - "sagemaker:BatchGetMetrics"
+                  - "sagemaker:DescribeCompilationJob"
+                  - "sagemaker:GetSearchSuggestions"
+                  - "sagemaker:DescribeExperiment"
+                  - "sagemaker:DescribeDomain"
+                  - "sagemaker:ListModels"
+                  - "sagemaker:DescribeCodeRepository"
+                  - "sagemaker:ListPipelineExecutionSteps"
+                  - "sagemaker:DescribeDevice"
+                  - "sagemaker:ListCodeRepositories"
+                Resource:
+                  - "*"
+
+  LambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: "LambdaRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListAccessPointsForObjectLambda"
+                  - "sagemaker:DescribeTrainingJob"
+                  - "states:ListStateMachines"
+                  - "sagemaker:DescribeModelPackage"
+                  - "states:DescribeStateMachine"
+                  - "s3:PutStorageLensConfiguration"
+                  - "sagemaker:DescribeModelPackageGroup"
+                  - "sagemaker:CreateModelPackageGroup"
+                  - "ecr:BatchGetRepositoryScanningConfiguration"
+                  - "logs:CreateLogStream"
+                  - "states:GetExecutionHistory"
+                  - "ecr:BatchCheckLayerAvailability"
+                  - "ecr:GetLifecyclePolicy"
+                  - "s3:PutAccountPublicAccessBlock"
+                  - "states:DescribeActivity"
+                  - "ecr:DescribeImageScanFindings"
+                  - "states:ListActivities"
+                  - "s3:ListJobs"
+                  - "ecr:GetDownloadUrlForLayer"
+                  - "ecr:DescribePullThroughCacheRules"
+                  - "sagemaker:CreateModelPackage"
+                  - "ecr:GetAuthorizationToken"
+                  - "states:StartSyncExecution"
+                  - "logs:CreateLogGroup"
+                  - "states:DescribeExecution"
+                  - "s3:PutAccessPointPublicAccessBlock"
+                  - "ecr:BatchGetImage"
+                  - "ecr:DescribeImages"
+                  - "s3:CreateJob"
+                  - "s3:GetAccessPoint"
+                  - "states:ListExecutions"
+                  - "ecr:DescribeImageReplicationStatus"
+                  - "ecr:ListTagsForResource"
+                  - "ecr:ListImages"
+                  - "ecr:GetRegistryScanningConfiguration"
+                  - "sagemaker:ListModelPackageGroups"
+                  - "ecr:DescribeRepositories"
+                  - "ecr:GetRegistryPolicy"
+                  - "s3:ListAccessPoints"
+                  - "ecr:GetLifecyclePolicyPreview"
+                  - "sagemaker:UpdateModelPackage"
+                  - "ecr:DescribeRegistry"
+                  - "s3:ListMultiRegionAccessPoints"
+                  - "logs:PutLogEvents"
+                  - "s3:ListStorageLensConfigurations"
+                  - "states:DescribeStateMachineForExecution"
+                  - "s3:GetAccountPublicAccessBlock"
+                  - "s3:ListAllMyBuckets"
+                  - "states:StartExecution"
+                  - "states:ListTagsForResource"
+                  - "ecr:GetRepositoryPolicy"
+                Resource:
+                  - "*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:*"
+                Resource:
+                  - "arn:aws:s3:::*belt*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:*"
+                Resource:
+                  - "arn:aws:s3:::*belt*/*"
+
+  SageMakerExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "sagemaker.amazonaws.com"
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: "SageMakerExecutionRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "sagemaker:CreatePresignedDomainUrl"
+                  - "sagemaker:DescribeDomain"
+                  - "sagemaker:ListDomains"
+                  - "sagemaker:DescribeUserProfile"
+                  - "sagemaker:ListUserProfiles"
+                  - "sagemaker:*App"
+                  - "sagemaker:ListApps"
+                  - "sagemaker:CreateHyperParameterTuningJob"
+                  - "sagemaker:DescribeHyperParameterTuningJob"
+                  - "sagemaker:StopHyperParameterTuningJob"
+                  - "sagemaker:ListTags"
+                  - "sagemaker:CreateModel"
+                  - "sagemaker:CreateTransformJob"
+                Resource:
+                  - "*"
+              - Effect: "Allow"
+                Action:
+                  - "sagemaker:*"
+                Resource:
+                  - "arn:aws:sagemaker:*:*:flow-definition/*"
+              - Effect: "Allow"
+                Action:
+                  - "logs:CreateLogDelivery"
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:DeleteLogDelivery"
+                  - "logs:Describe*"
+                  - "logs:GetLogDelivery"
+                  - "logs:GetLogEvents"
+                  - "logs:ListLogDeliveries"
+                  - "logs:PutLogEvents"
+                  - "logs:PutResourcePolicy"
+                  - "logs:UpdateLogDelivery"
+                Resource:
+                  - "*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                  - "s3:DeleteObject"
+                  - "s3:AbortMultipartUpload"
+                  - "s3:GetObject"
+                  - "s3:GetBucketLocation"
+                  - "s3:ListBucket"
+                  - "s3:GetBucketAcl"
+                  - "s3:ListAllMyBuckets"
+                Resource:
+                  - "arn:aws:s3:::*belt*"
+              - Effect: "Allow"
+                Action:
+                  - "iam:PassRole"
+                Resource:
+                  - "arn:aws:iam::*:role/*sage*"
+
+  SFNOrchestratorRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "states.amazonaws.com"
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: "SFNOrchestratorRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "states:*"
+                  - "logs:CreateLogStream"
+                  - "cloudwatch:PutMetricData"
+                  - "logs:DescribeLogStreams"
+                  - "ecr:GetDownloadUrlForLayer"
+                  - "sagemaker:*"
+                  - "ecr:BatchGetImage"
+                  - "ecr:GetAuthorizationToken"
+                  - "s3:ListBucket"
+                  - "logs:CreateLogGroup"
+                  - "logs:PutLogEvents"
+                  - "ecr:BatchCheckLayerAvailability"
+                  - "events:PutTargets"
+                  - "events:PutRule"
+                  - "events:DescribeRule"
+                  - "lambda:InvokeFunction"
+                Resource:
+                  - "*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                Resource:
+                  - "arn:aws:s3:::*belt*"
+              - Effect: "Allow"
+                Action:
+                  - "iam:PassRole"
+                Resource:
+                  - "*"
