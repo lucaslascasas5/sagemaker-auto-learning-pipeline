@@ -1,7 +1,6 @@
 import os
 import boto3
 import pandas as pd
-from datetime import datetime
 
 sagemaker = boto3.client('sagemaker')
 s3 = boto3.client('s3')

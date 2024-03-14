@@ -1,6 +1,5 @@
 import boto3
 import os
-import datetime
 import json
 
 sagemaker = boto3.client('sagemaker')
