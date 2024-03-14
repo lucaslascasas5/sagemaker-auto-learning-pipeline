@@ -219,8 +219,6 @@ Resources:
       Handler: "extract_model.lambda_handler"
       FunctionName: !Sub "black-belt-extract-model-${Stage}"
       Role: !Select [ 1, !Ref RolesList ]
-      Layers:
-        - "arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python39:1"
 
   RegisterModelFunction:
     Type: "AWS::Serverless::Function"
@@ -231,8 +229,6 @@ Resources:
       Role: !Select [ 1, !Ref RolesList ]
       Timeout: 900
       MemorySize: 1024
-      Layers:
-        - "arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python39:1"
       Environment:
         Variables:
           model_package_group_name: !Sub "xgboost-fraud-models-${Stage}"
